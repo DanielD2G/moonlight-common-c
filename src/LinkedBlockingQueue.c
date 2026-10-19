@@ -247,3 +247,62 @@ int LbqWaitForQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data) {
 
     return LBQ_SUCCESS;
 }
+
+// Clue: same as LbqWaitForQueueElement(), but returns LBQ_TIMED_OUT when no element shows up
+// within timeoutUs (0 polls). Lets the input thread wake up to resend controller state without
+// spinning; LbqWaitForQueueElement() itself is unchanged.
+int LbqWaitForQueueElementTimeout(PLINKED_BLOCKING_QUEUE queueHead, void** data, uint32_t timeoutUs) {
+    PLINKED_BLOCKING_QUEUE_ENTRY entry;
+    uint64_t deadlineUs = PltGetMicroseconds() + timeoutUs;
+
+    PltLockMutex(&queueHead->mutex);
+
+    // Wait for a waking condition: either data available, rundown or the deadline
+    while (queueHead->head == NULL && !queueHead->draining && !queueHead->shutdown && !queueHead->pendingUserWake) {
+        uint64_t nowUs = PltGetMicroseconds();
+        if (nowUs >= deadlineUs) {
+            PltUnlockMutex(&queueHead->mutex);
+            return LBQ_TIMED_OUT;
+        }
+        PltWaitForConditionVariableTimeout(&queueHead->cond, &queueHead->mutex, (uint32_t)(deadlineUs - nowUs));
+    }
+
+    // If we're shutting down, abort immediately, even if there's data available
+    if (queueHead->shutdown) {
+        PltUnlockMutex(&queueHead->mutex);
+        return LBQ_INTERRUPTED;
+    }
+
+    // If this is a user requested wake, process it now
+    if (queueHead->pendingUserWake) {
+        queueHead->pendingUserWake = false;
+        PltUnlockMutex(&queueHead->mutex);
+        return LBQ_USER_WAKE;
+    }
+
+    // If we're draining, only abort if we have no data available
+    if (queueHead->draining && queueHead->head == NULL) {
+        PltUnlockMutex(&queueHead->mutex);
+        return LBQ_INTERRUPTED;
+    }
+
+    LC_ASSERT(queueHead->head != NULL);
+
+    entry = queueHead->head;
+    queueHead->head = entry->flink;
+    queueHead->currentSize--;
+    if (queueHead->head == NULL) {
+        LC_ASSERT(queueHead->currentSize == 0);
+        queueHead->tail = NULL;
+    }
+    else {
+        LC_ASSERT(queueHead->currentSize != 0);
+        queueHead->head->blink = NULL;
+    }
+
+    *data = entry->data;
+
+    PltUnlockMutex(&queueHead->mutex);
+
+    return LBQ_SUCCESS;
+}

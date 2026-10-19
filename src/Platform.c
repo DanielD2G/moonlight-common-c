@@ -383,6 +383,16 @@ int PltCreateConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex) {
     OSFastCond_Init(cond, "");
 #elif defined(__3DS__)
     CondVar_Init(cond);
+#elif defined(__ANDROID__) || defined(__linux__)
+    // Clue: timed waits (PltWaitForConditionVariableTimeout) count on the monotonic clock,
+    // so a wall clock change can never stretch them. Untimed waits are unaffected.
+    {
+        pthread_condattr_t attr;
+        pthread_condattr_init(&attr);
+        pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+        pthread_cond_init(cond, &attr);
+        pthread_condattr_destroy(&attr);
+    }
 #else
     pthread_cond_init(cond, NULL);
 #endif
@@ -425,6 +435,37 @@ void PltWaitForConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex) {
     CondVar_Wait(cond, mutex);
 #else
     pthread_cond_wait(cond, mutex);
+#endif
+}
+
+// Clue: bounded condition variable wait, used by LbqWaitForQueueElementTimeout()
+void PltWaitForConditionVariableTimeout(PLT_COND* cond, PLT_MUTEX* mutex, uint32_t timeoutUs) {
+#if defined(LC_WINDOWS)
+    SleepConditionVariableSRW(cond, mutex, (timeoutUs + 999) / 1000, 0);
+#elif defined(__WIIU__)
+    // No timed wait available: behaves like an untimed wait (no early wake-ups for resends)
+    OSFastCond_Wait(cond, mutex);
+#elif defined(__3DS__)
+    CondVar_WaitTimeout(cond, mutex, (s64)timeoutUs * 1000);
+#elif defined(LC_DARWIN)
+    struct timespec rel;
+    rel.tv_sec = timeoutUs / 1000000;
+    rel.tv_nsec = (long)(timeoutUs % 1000000) * 1000;
+    pthread_cond_timedwait_relative_np(cond, mutex, &rel);
+#else
+    struct timespec ts;
+# if defined(__ANDROID__) || defined(__linux__)
+    clock_gettime(CLOCK_MONOTONIC, &ts); // matches the condattr clock set in PltCreateConditionVariable()
+# else
+    clock_gettime(CLOCK_REALTIME, &ts);
+# endif
+    ts.tv_sec += timeoutUs / 1000000;
+    ts.tv_nsec += (long)(timeoutUs % 1000000) * 1000;
+    if (ts.tv_nsec >= 1000000000) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000;
+    }
+    pthread_cond_timedwait(cond, mutex, &ts);
 #endif
 }
 

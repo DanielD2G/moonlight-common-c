@@ -17,3 +17,20 @@ bool ClueRedundancyShouldResend(PCLUE_PAD_STATE state, uint64_t nowUs) {
            nowUs - state->lastChangeUs < CLUE_ACTIVE_WINDOW_US &&
            nowUs - state->lastSendUs >= CLUE_RESEND_INTERVAL_US;
 }
+
+uint64_t ClueRedundancyNextCheckUs(const CLUE_PAD_STATE* pads, int count, uint64_t nowUs) {
+    uint64_t next = 0;
+    for (int i = 0; i < count; i++) {
+        if (!pads[i].valid || nowUs - pads[i].lastChangeUs >= CLUE_ACTIVE_WINDOW_US) {
+            continue;
+        }
+        uint64_t due = pads[i].lastSendUs + CLUE_RESEND_INTERVAL_US;
+        if (due < nowUs + CLUE_MIN_WAKE_US) {
+            due = nowUs + CLUE_MIN_WAKE_US;
+        }
+        if (next == 0 || due < next) {
+            next = due;
+        }
+    }
+    return next;
+}

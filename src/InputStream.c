@@ -1,4 +1,5 @@
 #include "Limelight-internal.h"
+#include "ClueRedundancy.h" /* CLUE */
 
 static SOCKET inputSock = INVALID_SOCKET;
 static unsigned char currentAesIv[16];
@@ -51,7 +52,8 @@ typedef struct _PACKET_HOLDER {
     LINKED_BLOCKING_QUEUE_ENTRY entry;
     uint32_t enetPacketFlags;
     uint8_t channelId;
-    uint64_t clueEnqueueUs; /* CLUE: enqueue time of the first event in this packet */
+    uint64_t clueEnqueueUs; /* CLUE: enqueue time of the first event in this packet (0 = resend, not traced) */
+    uint8_t clueCopies; /* CLUE: how many times the input thread sends this packet (2 on a controller button change) */
 
     // The union must be the last member since we abuse the NV_UNICODE_PACKET
     // text field to store variable length data which gets split before being
@@ -93,6 +95,13 @@ static struct {
     bool dirty; // Update ready to send (queued packet holder in packetQueue)
 } currentAbsoluteMouseState;
 
+/* CLUE: controller state goes unreliable with redundancy on Sunshine-family hosts (see
+   sendControllerEventInternal). Per controller: the redundancy policy state and the last state
+   packet that left for the host, both guarded by batchedInputMutex. */
+static bool clueUnreliablePads;
+static CLUE_PAD_STATE cluePadState[MAX_GAMEPADS];
+static NV_MULTI_CONTROLLER_PACKET clueLastPadPacket[MAX_GAMEPADS];
+
 // Initializes the input stream
 int initializeInputStream(void) {
     memcpy(currentAesIv, StreamConfig.remoteInputAesIv, sizeof(currentAesIv));
@@ -123,6 +132,12 @@ int initializeInputStream(void) {
     memset(&currentRelativeMouseState, 0, sizeof(currentRelativeMouseState));
     memset(&currentAbsoluteMouseState, 0, sizeof(currentAbsoluteMouseState));
     PltCreateMutex(&batchedInputMutex);
+
+    /* CLUE: Sunshine-family hosts take unreliable control packets (sendMessageEnet forces
+       reliable for anything else, so GFE keeps exactly the upstream behavior) */
+    clueUnreliablePads = IS_SUNSHINE() && AppVersionQuad[0] >= 5;
+    memset(cluePadState, 0, sizeof(cluePadState));
+    memset(clueLastPadPacket, 0, sizeof(clueLastPadPacket));
 
     return 0;
 }
@@ -216,6 +231,7 @@ static PPACKET_HOLDER allocatePacketHolder(int extraLength) {
     PPACKET_HOLDER holder = allocatePacketHolderInternal(extraLength);
     if (holder != NULL) {
         holder->clueEnqueueUs = PltGetMicroseconds();
+        holder->clueCopies = 1;
     }
     return holder;
 }
@@ -323,7 +339,7 @@ static bool sendInputPacket(PPACKET_HOLDER holder, bool moreData) {
     }
 
     /* CLUE: the packet is on its way to the host */
-    if (clueInputWireCallback != NULL) {
+    if (clueInputWireCallback != NULL && holder->clueEnqueueUs != 0) {
         clueInputWireCallback(holder->channelId, holder->clueEnqueueUs);
     }
 
@@ -341,6 +357,44 @@ static void floatToNetfloat(float in, netfloat out) {
         out[2] = inb[1];
         out[3] = inb[0];
     }
+}
+
+/* CLUE: resend the last state of every active controller whose resend is due and that has no
+   newer state waiting in the queue (that one is about to go out anyway). Sets the time of the
+   next check (0 = no active controller). Returns false if the connection failed. */
+static bool clueResendControllerStates(uint64_t nowUs, uint64_t* nextCheckUs) {
+    NV_MULTI_CONTROLLER_PACKET packets[MAX_GAMEPADS];
+    uint32_t mask = 0;
+
+    PltLockMutex(&batchedInputMutex);
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        if (currentQueuedControllerPacket[i] == NULL &&
+            clueLastPadPacket[i].header.size != 0 &&
+            ClueRedundancyShouldResend(&cluePadState[i], nowUs)) {
+            packets[i] = clueLastPadPacket[i];
+            ClueRedundancyOnSent(&cluePadState[i], nowUs);
+            mask |= 1u << i;
+        }
+    }
+    *nextCheckUs = ClueRedundancyNextCheckUs(cluePadState, MAX_GAMEPADS, nowUs);
+    PltUnlockMutex(&batchedInputMutex);
+
+    for (int i = 0; mask != 0; i++, mask >>= 1) {
+        if (mask & 1) {
+            PACKET_HOLDER resend;
+
+            resend.channelId = CTRL_CHANNEL_GAMEPAD_BASE + i;
+            resend.enetPacketFlags = 0; // same flag as the original state packet
+            resend.clueEnqueueUs = 0; // not a new event, keep it out of the enqueue-to-wire trace
+            resend.clueCopies = 1;
+            resend.packet.multiController = packets[i];
+            if (!sendInputPacket(&resend, (mask >> 1) != 0)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 // Input thread proc
@@ -361,9 +415,29 @@ static void inputSendThreadProc(void* context) {
 
     uint64_t lastMousePacketTime = 0;
     uint64_t lastPenPacketTime = 0;
+    uint64_t clueNextCheckUs = 0; /* CLUE: next controller resend check, 0 = no active controller */
 
     while (!PltIsThreadInterrupted(&inputSendThread)) {
-        err = LbqWaitForQueueElement(&packetQueue, (void**)&holder);
+        /* CLUE: while a controller is active, wait for input no longer than the next resend check
+           and resend once the queue is empty (fresh input goes first). With no active controller
+           (and always on GFE) this blocks with no timeout, exactly as upstream. */
+        if (clueNextCheckUs != 0) {
+            uint64_t nowUs = PltGetMicroseconds();
+            if (nowUs >= clueNextCheckUs && LbqGetItemCount(&packetQueue) == 0) {
+                if (!clueResendControllerStates(nowUs, &clueNextCheckUs)) {
+                    return;
+                }
+                continue;
+            }
+            err = LbqWaitForQueueElementTimeout(&packetQueue, (void**)&holder,
+                                                nowUs < clueNextCheckUs ? (uint32_t)(clueNextCheckUs - nowUs) : 0);
+            if (err == LBQ_TIMED_OUT) {
+                continue;
+            }
+        }
+        else {
+            err = LbqWaitForQueueElement(&packetQueue, (void**)&holder);
+        }
         if (err != LBQ_SUCCESS) {
             return;
         }
@@ -382,6 +456,15 @@ static void inputSendThreadProc(void* context) {
             // it's fine if the input code continues to update a later packet concurrently.
             if (holder == currentQueuedControllerPacket[controllerNumber]) {
                 currentQueuedControllerPacket[controllerNumber] = NULL;
+            }
+
+            /* CLUE: the packet is latched now (nothing batches into it anymore) and leaves right
+               below: remember it for resends and schedule the next resend check */
+            if (clueUnreliablePads) {
+                uint64_t nowUs = PltGetMicroseconds();
+                clueLastPadPacket[controllerNumber] = holder->packet.multiController;
+                ClueRedundancyOnSent(&cluePadState[controllerNumber], nowUs);
+                clueNextCheckUs = ClueRedundancyNextCheckUs(cluePadState, MAX_GAMEPADS, nowUs);
             }
 
             PltUnlockMutex(&batchedInputMutex);
@@ -627,6 +710,17 @@ static void inputSendThreadProc(void* context) {
 
             freePacketHolder(holder);
             continue;
+        }
+
+        /* CLUE: a controller button change goes out twice, in separate datagrams (moreData = false
+           flushes the first one on its own), so losing one datagram does not lose the press.
+           The copy is not a new event for the enqueue-to-wire trace. */
+        if (holder->clueCopies > 1) {
+            if (!sendInputPacket(holder, false)) {
+                freePacketHolder(holder);
+                return;
+            }
+            holder->clueEnqueueUs = 0;
         }
 
         // Encrypt and send the input packet
@@ -1097,7 +1191,21 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         holder->channelId = CTRL_CHANNEL_GAMEPAD_BASE + controllerNumber;
 
         // TODO: Send this as unreliable sequenced when we have a delayed reliable retransmission thread
-        holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+        //
+        // CLUE: on Sunshine-family hosts controller state is unreliable *sequenced* (flags 0) and
+        // made robust by redundancy instead of ENet retransmission: 2 copies on a button change and
+        // a resend of the last state every 4 ms while input is active (ClueRedundancy.c), so a lost
+        // datagram never stalls input behind a reliable retransmit. Sequenced rather than
+        // UNSEQUENCED (what touch uses) on purpose:
+        //  - each controller has its own channel and ENet drops any state older than the newest one
+        //    received on it, so a delayed old state (e.g. "A down" overtaking "A up") can never be
+        //    applied after a newer one and leave a wrong or ghost button on the host;
+        //  - it stays ordered behind the reliable packets on the same channel (controller arrival,
+        //    touchpad, battery), so a state can never reach the host before the arrival that tells
+        //    it the controller type. If one of those reliable packets is lost, state waits for its
+        //    retransmit, which is exactly today's behavior and nothing worse.
+        // GFE keeps reliable (sendMessageEnet forces it anyway).
+        holder->enetPacketFlags = clueUnreliablePads ? 0 : ENET_PACKET_FLAG_RELIABLE;
 
         // Remember that we need to enqueue this holder since it's new
         enqueueHolder = true;
@@ -1154,6 +1262,13 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         if (enqueueHolder) {
             // Make this new packet holder the current enqueued packet
             currentQueuedControllerPacket[controllerNumber] = holder;
+        }
+
+        /* CLUE: a button change is sent twice by the input thread. The flag lives on the holder,
+           so batching later axis updates into it keeps both copies (and both carry the latest axes). */
+        if (clueUnreliablePads &&
+            ClueRedundancyOnState(&cluePadState[controllerNumber], (uint32_t)buttonFlags, PltGetMicroseconds()) == 2) {
+            holder->clueCopies = 2;
         }
     }
 

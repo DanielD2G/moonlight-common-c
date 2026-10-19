@@ -8,6 +8,7 @@
 #define LBQ_BOUND_EXCEEDED 2
 #define LBQ_NO_ELEMENT 3
 #define LBQ_USER_WAKE 4
+#define LBQ_TIMED_OUT 5 // Clue: only returned by LbqWaitForQueueElementTimeout()
 
 typedef struct _LINKED_BLOCKING_QUEUE_ENTRY {
     struct _LINKED_BLOCKING_QUEUE_ENTRY* flink;
@@ -31,6 +32,8 @@ typedef struct _LINKED_BLOCKING_QUEUE {
 int LbqInitializeLinkedBlockingQueue(PLINKED_BLOCKING_QUEUE queueHead, int sizeBound);
 int LbqOfferQueueItem(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry);
 int LbqWaitForQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data);
+// Clue: like LbqWaitForQueueElement(), but gives up with LBQ_TIMED_OUT after timeoutUs
+int LbqWaitForQueueElementTimeout(PLINKED_BLOCKING_QUEUE queueHead, void** data, uint32_t timeoutUs);
 int LbqPollQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data);
 int LbqPeekQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data);
 PLINKED_BLOCKING_QUEUE_ENTRY LbqDestroyLinkedBlockingQueue(PLINKED_BLOCKING_QUEUE queueHead);

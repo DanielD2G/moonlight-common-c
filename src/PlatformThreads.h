@@ -68,6 +68,8 @@ int PltCreateConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex);
 void PltDeleteConditionVariable(PLT_COND* cond);
 void PltSignalConditionVariable(PLT_COND* cond);
 void PltWaitForConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex);
+// Clue: waits at most timeoutUs (may wake early or spuriously; callers re-check their condition)
+void PltWaitForConditionVariableTimeout(PLT_COND* cond, PLT_MUTEX* mutex, uint32_t timeoutUs);
 
 void PltSleepMs(int ms);
 void PltSleepMsInterruptible(PLT_THREAD* thread, int ms);
