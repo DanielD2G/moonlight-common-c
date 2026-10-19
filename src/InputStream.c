@@ -267,8 +267,25 @@ static PPACKET_HOLDER allocatePacketHolderInternal(int extraLength) {
     }
 }
 
+/* CLUE: loss injection for tests. When > 0, one in every N unreliable controller datagrams is
+   dropped right before it would be sent, as a lossy Wi-Fi link would. Never set in normal use. */
+static int clueDropEvery;
+static unsigned int clueDropCounter;
+
+void LiClueSetInputDropEvery(int everyN) {
+    clueDropEvery = everyN;
+    clueDropCounter = 0;
+}
+
 static bool sendInputPacket(PPACKET_HOLDER holder, bool moreData) {
     SOCK_RET err;
+
+    if (clueDropEvery > 0 &&
+        holder->channelId >= CTRL_CHANNEL_GAMEPAD_BASE && holder->channelId < CTRL_CHANNEL_SENSOR_BASE &&
+        !(holder->enetPacketFlags & ENET_PACKET_FLAG_RELIABLE) &&
+        ++clueDropCounter % (unsigned int)clueDropEvery == 0) {
+        return true; /* CLUE: dropped "on the network" */
+    }
 
     // On GFE 3.22, the entire control stream is encrypted (and support for separate RI encrypted)
     // has been removed. We send the plaintext packet through and the control stream code will do

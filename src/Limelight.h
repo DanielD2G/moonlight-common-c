@@ -856,6 +856,9 @@ uint64_t LiGetMicroseconds(void);
 typedef void (*ClueInputWireCallback)(uint8_t channelId, uint64_t enqueueUs);
 void LiClueSetInputWireCallback(ClueInputWireCallback callback);
 
+// CLUE: test-only loss injection, drops one in every N unreliable controller datagrams (0 = off).
+void LiClueSetInputDropEvery(int everyN);
+
 // This function returns a time in milliseconds with an implementation-defined epoch.
 // It should only ever be compared with the return value from a previous call to itself.
 uint64_t LiGetMillis(void);
