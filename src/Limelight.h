@@ -850,6 +850,12 @@ int LiSendHighResHScrollEvent(short scrollAmount);
 // It should only ever be compared with the return value from a previous call to itself.
 uint64_t LiGetMicroseconds(void);
 
+// CLUE: optional hook called on the input send path right after a packet is handed to the
+// control stream, with its ENet channel and the LiGetMicroseconds() time its first event was
+// enqueued. Called from the sending thread; it must not block.
+typedef void (*ClueInputWireCallback)(uint8_t channelId, uint64_t enqueueUs);
+void LiClueSetInputWireCallback(ClueInputWireCallback callback);
+
 // This function returns a time in milliseconds with an implementation-defined epoch.
 // It should only ever be compared with the return value from a previous call to itself.
 uint64_t LiGetMillis(void);

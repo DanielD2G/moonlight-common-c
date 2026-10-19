@@ -51,6 +51,7 @@ typedef struct _PACKET_HOLDER {
     LINKED_BLOCKING_QUEUE_ENTRY entry;
     uint32_t enetPacketFlags;
     uint8_t channelId;
+    uint64_t clueEnqueueUs; /* CLUE: enqueue time of the first event in this packet */
 
     // The union must be the last member since we abuse the NV_UNICODE_PACKET
     // text field to store variable length data which gets split before being
@@ -201,7 +202,25 @@ static void freePacketHolder(PPACKET_HOLDER holder) {
     }
 }
 
+static PPACKET_HOLDER allocatePacketHolderInternal(int extraLength);
+
+/* CLUE: optional hook told when an input packet leaves for the host, with its enqueue time */
+static ClueInputWireCallback clueInputWireCallback;
+
+void LiClueSetInputWireCallback(ClueInputWireCallback callback) {
+    clueInputWireCallback = callback;
+}
+
+/* CLUE: stamp every holder with the time its first event was enqueued */
 static PPACKET_HOLDER allocatePacketHolder(int extraLength) {
+    PPACKET_HOLDER holder = allocatePacketHolderInternal(extraLength);
+    if (holder != NULL) {
+        holder->clueEnqueueUs = PltGetMicroseconds();
+    }
+    return holder;
+}
+
+static PPACKET_HOLDER allocatePacketHolderInternal(int extraLength) {
     PPACKET_HOLDER holder;
     int err;
 
@@ -301,6 +320,11 @@ static bool sendInputPacket(PPACKET_HOLDER holder, bool moreData) {
                 return false;
             }
         }
+    }
+
+    /* CLUE: the packet is on its way to the host */
+    if (clueInputWireCallback != NULL) {
+        clueInputWireCallback(holder->channelId, holder->clueEnqueueUs);
     }
 
     return true;
