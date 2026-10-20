@@ -569,6 +569,14 @@ const char* LiGetStageName(int stage);
 // This function may only be called between LiStartConnection() and LiStopConnection().
 bool LiGetEstimatedRttInfo(uint32_t* estimatedRtt, uint32_t* estimatedRttVariance);
 
+// Clue: Apollo protocol extension, ported from Artemis' moonlight-common-c.
+// This function asks the host to run the server command with the given index, as listed in the
+// ServerCommand fields of the host's serverinfo. It is only sent on hosts with an encrypted
+// control stream (Sunshine-based); hosts that do not know the message ignore it.
+// Returns 0 on success, -1 if the message could not be sent and -2 if this host cannot take it.
+// This function may only be called between LiStartConnection() and LiStopConnection().
+int LiSendExecServerCmd(uint8_t cmdId);
+
 // This function queues a relative mouse move event to be sent to the remote server.
 int LiSendMouseMoveEvent(short deltaX, short deltaY);
 

@@ -2072,6 +2072,25 @@ int startControlStream(void) {
     return 0;
 }
 
+// Clue: Apollo protocol extension, ported from Artemis' moonlight-common-c (LiSendExecServerCmd).
+// Artemis keeps the packet type in the packetTypes tables (IDX_EXEC_SERVER_CMD, -1 on every
+// generation but Gen7Enc); we leave the upstream tables untouched and only send on Gen7Enc hosts.
+#define AP_EXEC_SERVER_CMD_PTYPE 0x3000
+int LiSendExecServerCmd(uint8_t cmdId) {
+    uint8_t payload[4] = { cmdId, 0, 0, 0 };
+
+    if (!IS_SUNSHINE() || !encryptedControlStream || peer == NULL || stopping) {
+        return -2;
+    }
+
+    return sendMessageAndForget(AP_EXEC_SERVER_CMD_PTYPE,
+                                sizeof(payload),
+                                payload,
+                                CTRL_CHANNEL_SERVERCTL,
+                                ENET_PACKET_FLAG_RELIABLE,
+                                false) ? 0 : -1;
+}
+
 bool LiGetCurrentHostDisplayHdrMode(void) {
     return hdrEnabled;
 }
